@@ -1,0 +1,168 @@
+{
+  "Comment": "My Statemachine",
+  "StartAt": "lambda_function",
+  "States": {
+    "lambda_function": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "lambda-determine-storage",
+        "Payload": {}
+      },
+      "ResultPath": "$.lambda_op",
+      "Next": "create_emr_cluster"
+    },
+    "create_emr_cluster": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:createCluster.sync",
+      "Parameters": {
+          "JobFlowRole": "<JOB-FLOW-IAM-ROLE>",
+          "LogUri": "s3://<YOUR-BUCKET>/logs/emr-job-logs/",
+          "Name": "dataprocessing-emr-cluster",
+          "ReleaseLabel": "emr-6.2.0",
+          "ServiceRole": "<EMR-SERVICE-IAM-ROLE>",
+          "Applications": [
+              {
+                  "Name": "Spark"
+              },
+              {
+                  "Name": "Hadoop"
+              },
+              {
+                  "Name": "Hive"
+              },
+              {
+                  "Name": "JupyterHub"
+              },
+              {
+                  "Name": "Ganglia"
+              }
+          ],
+          "BootstrapActions": [
+              {
+                  "Name": "Download code",
+                  "ScriptBootstrapAction": {
+                      "Path": "s3://<YOUR-BUCKET>/get_code.sh"
+                  }
+              }
+          ],
+          "CustomAmiId": "<OPTIONAL-CUSTOM-AMI>",
+          "EbsRootVolumeSize": 20,
+          "Instances": {
+              "Ec2KeyName": "<PEM KEY>",
+              "Ec2SubnetId": "<SUBNET>",
+              "EmrManagedMasterSecurityGroup": "<SECURITY-GROUP>",
+              "EmrManagedSlaveSecurityGroup": "<SECURITY-GROUP>",
+              "InstanceFleets": [
+                  {
+                      "InstanceFleetType": "MASTER",
+                      "InstanceTypeConfigs": [
+                          {
+                              "InstanceType": "m5.xlarge"
+                          }
+                      ],
+                      "Name": "MASTER",
+                      "TargetOnDemandCapacity": 1
+                  },
+                  {
+                      "InstanceFleetType": "CORE",
+                      "InstanceTypeConfigs": [
+                          {
+                              "BidPriceAsPercentageOfOnDemandPrice": 100,
+                              "EbsConfiguration": {
+                                  "EbsBlockDeviceConfigs": [
+                                      {
+                                          "VolumeSpecification": {
+                                              "SizeInGB.$": "$.lambda_op.ebs_size",
+                                              "VolumeType": "gp2"
+                                          },
+                                          "VolumesPerInstance": 1
+                                      }
+                                  ],
+                                  "EbsOptimized": true
+                              },
+                              "InstanceType": "r5.12xlarge"
+                          }
+                      ],
+                      "Name": "CORE",
+                      "TargetSpotCapacity": 6
+                  }
+              ],
+              "KeepJobFlowAliveWhenNoSteps": true
+          },
+          "Tags": [
+              {
+                  "Key": "Name",
+                  "Value": "dataprocessing-emr-cluster"
+              }
+          ],
+          "VisibleToAllUsers": true
+      },
+      "ResultPath": "$.ClusterResults",
+      "Next": "create_emr_alarms"
+    },
+    "create_emr_alarms": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+      "Parameters": {
+        "ClusterId.$": "$.ClusterResults.ClusterId",
+        "Step": {
+          "Name": "Create Alarms",
+          "ActionOnFailure": "CONTINUE",
+          "HadoopJarStep": {
+            "Jar": "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
+            "Args": [
+              "s3://<YOUR-BUCKET>/create_alarms.sh"
+            ]
+          }
+        }
+      },
+      "ResultPath": "$.emr_alarms",
+      "Next": "map_reduce"
+    },
+    "map_reduce": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+      "Parameters": {
+        "ClusterId.$": "$.ClusterResults.ClusterId",
+        "Step": {
+          "Name": "map_reduce step",
+          "ActionOnFailure": "CANCEL_AND_WAIT",
+          "HadoopJarStep": {
+            "Jar": "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
+            "Args": "s3://<YOUR-BUCKET>/map_reduce.sh"
+          }
+        }
+      },
+      "ResultPath": "$.mapreduce",
+      "Next": "delete_emr_alarms"
+    },
+    "delete_emr_alarms": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:addStep.sync",
+      "Parameters": {
+        "ClusterId.$": "$.ClusterResults.ClusterId",
+        "Step": {
+          "Name": "Delete Alarms",
+          "ActionOnFailure": "CONTINUE",
+          "HadoopJarStep": {
+            "Jar": "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar",
+            "Args": [
+              "s3://<YOUR-BUCKET>/delete_alarms.sh"
+            ]
+          }
+        }
+      },
+      "ResultPath": "$.deleted_emr_alarms",
+      "Next": "terminate_emr"
+    },
+    "terminate_emr": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::elasticmapreduce:terminateCluster.sync",
+      "Parameters": {
+        "ClusterId.$": "$.ClusterResults.ClusterId"
+      },
+      "End": true
+    }
+  }
+}
